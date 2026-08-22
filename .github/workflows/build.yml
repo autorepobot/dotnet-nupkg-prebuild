@@ -53,14 +53,14 @@ jobs:
           set -ex  
           ./prep-source-build.sh -c Release --no-bootstrap --no-sdk --with-sdk "$DOTNET_ROOT"  
   
-      - name: Build CoreCLR + Libs + Host + AspNetCore + packs (原生编译，无需 --cross/ROOTFS_DIR)  
-        run: |  
-          set -ex  
-          ./build.sh \  
-            --with-sdk "$DOTNET_ROOT" \  
-            -c Release \  
-            /p:Subset=clr+libs+host+packs+aspnetcore \  
-            /bl:artifacts/log/Release/build-riscv64.binlog  
+      - name: Build CoreCLR + Libs + Host + AspNetCore + packs
+        run: |
+          set -ex
+          ./build.sh \
+            --with-sdk "$DOTNET_ROOT" \
+            -c Release \
+            /p:Subset=clr+libs+host+packs+aspnetcore \
+            /bl:artifacts/log/Release/build-riscv64.binlog
   
       - name: Locate produced nupkgs  
         run: |  
