@@ -1,0 +1,106 @@
+name: Build .NET riscv64 packages  
+  
+on:  
+  workflow_dispatch:  
+    inputs:  
+      dotnet_version:  
+        description: '要编译的 .NET 版本号 (对应 dotnet/dotnet 的 tag，如 v10.0.111)'  
+        required: true  
+        default: 'v10.0.111'  
+      sdk_url:  
+        description: '自己编译的 riscv64 SDK tarball 下载地址'  
+        required: true  
+        default: 'https://github.com/xujiegb/dotnet-riscv/releases/download/10.0.111/dotnet-sdk-10.0.111-linux-riscv64.tar.gz'  
+  
+permissions:  
+  contents: write   # 发布 release 需要写权限  
+  
+jobs:  
+  build:   
+    runs-on: ubuntu-24.04-riscv 
+  
+    env:  
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1  
+      DOTNET_NOLOGO: 1  
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1  
+      DOTNET_MULTILEVEL_LOOKUP: 0  
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages  
+  
+    steps:  
+      - name: Checkout dotnet/dotnet (VMR) at target version  
+        uses: actions/checkout@v4  
+        with:  
+          repository: dotnet/dotnet  
+          ref: ${{ github.event.inputs.dotnet_version }}  
+          submodules: false  
+          fetch-depth: 1  
+  
+      - name: Download and extract self-built riscv64 SDK  
+        run: |  
+          set -ex  
+          mkdir -p "$HOME/dotnet-sdk-bootstrap"  
+          curl -sSL "${{ github.event.inputs.sdk_url }}" -o /tmp/dotnet-sdk-riscv64.tar.gz  
+          tar -ozxf /tmp/dotnet-sdk-riscv64.tar.gz -C "$HOME/dotnet-sdk-bootstrap"  
+          echo "$HOME/dotnet-sdk-bootstrap" >> "$GITHUB_PATH"  
+          echo "DOTNET_ROOT=$HOME/dotnet-sdk-bootstrap" >> "$GITHUB_ENV"  
+  
+      - name: Verify SDK  
+        run: |  
+          dotnet --info  
+  
+      - name: Prep source build (skip bootstrap/自动下载 SDK，直接使用外部 SDK)  
+        run: |  
+          set -ex  
+          ./prep-source-build.sh -c Release --no-bootstrap --no-sdk --with-sdk "$DOTNET_ROOT"  
+  
+      - name: Build CoreCLR + Libs + Host + AspNetCore + packs (原生编译，无需 --cross/ROOTFS_DIR)  
+        run: |  
+          set -ex  
+          ./build.sh \  
+            --with-sdk "$DOTNET_ROOT" \  
+            -c Release \  
+            /p:Subset=clr+libs+host+packs+aspnetcore \  
+            /bl:artifacts/log/Release/build-riscv64.binlog  
+  
+      - name: Locate produced nupkgs  
+        run: |  
+          set -ex  
+          find artifacts -iname '*linux-riscv64*.nupkg' -print  
+  
+      - name: Collect nupkgs into a flat release staging dir  
+        run: |  
+          set -ex  
+          mkdir -p release-assets  
+          find artifacts -iname 'Microsoft.NETCore.App.Runtime.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
+          find artifacts -iname 'Microsoft.NETCore.App.Host.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
+          find artifacts -iname 'Microsoft.AspNetCore.App.Runtime.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
+          ls -la release-assets/  
+  
+      - name: Upload nupkgs as workflow artifact  
+        uses: actions/upload-artifact@v4  
+        with:  
+          name: dotnet-riscv64-nupkgs  
+          path: release-assets/*.nupkg  
+          if-no-files-found: error  
+  
+      - name: Determine release tag  
+        id: tag  
+        run: |  
+          echo "tag=riscv64-${{ github.event.inputs.dotnet_version }}-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"  
+  
+      - name: Publish GitHub Release  
+        uses: softprops/action-gh-release@v2  
+        with:  
+          tag_name: ${{ steps.tag.outputs.tag }}  
+          name: ".NET riscv64 packages ${{ github.event.inputs.dotnet_version }}"  
+          body: |  
+            自动交叉/原生编译产出的 riscv64 NuGet 包：  
+            - Microsoft.NETCore.App.Runtime.linux-riscv64  
+            - Microsoft.NETCore.App.Host.linux-riscv64  
+            - Microsoft.AspNetCore.App.Runtime.linux-riscv64  
+  
+            基于 dotnet/dotnet@${{ github.event.inputs.dotnet_version }} 构建，  
+            使用自编译 SDK: ${{ github.event.inputs.sdk_url }}  
+          files: release-assets/*.nupkg  
+          draft: false  
+          prerelease: true
