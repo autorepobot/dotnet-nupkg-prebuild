@@ -1,106 +1,154 @@
-name: Build .NET riscv64 packages  
-  
-on:  
-  workflow_dispatch:  
-    inputs:  
-      dotnet_version:  
-        description: '要编译的 .NET 版本号 (对应 dotnet/dotnet 的 tag，如 v10.0.111)'  
-        required: true  
-        default: 'v10.0.111'  
-      sdk_url:  
-        description: '自己编译的 riscv64 SDK tarball 下载地址'  
-        required: true  
-        default: 'https://github.com/xujiegb/dotnet-riscv/releases/download/10.0.111/dotnet-sdk-10.0.111-linux-riscv64.tar.gz'  
-  
-permissions:  
-  contents: write   # 发布 release 需要写权限  
-  
-jobs:  
-  build:   
-    runs-on: ubuntu-24.04-riscv 
-  
-    env:  
-      DOTNET_CLI_TELEMETRY_OPTOUT: 1  
-      DOTNET_NOLOGO: 1  
-      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1  
-      DOTNET_MULTILEVEL_LOOKUP: 0  
-      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages  
-  
-    steps:  
-      - name: Checkout dotnet/dotnet (VMR) at target version  
-        uses: actions/checkout@v4  
-        with:  
-          repository: dotnet/dotnet  
-          ref: ${{ github.event.inputs.dotnet_version }}  
-          submodules: false  
-          fetch-depth: 1  
-  
-      - name: Download and extract self-built riscv64 SDK  
-        run: |  
-          set -ex  
-          mkdir -p "$HOME/dotnet-sdk-bootstrap"  
-          curl -sSL "${{ github.event.inputs.sdk_url }}" -o /tmp/dotnet-sdk-riscv64.tar.gz  
-          tar -ozxf /tmp/dotnet-sdk-riscv64.tar.gz -C "$HOME/dotnet-sdk-bootstrap"  
-          echo "$HOME/dotnet-sdk-bootstrap" >> "$GITHUB_PATH"  
-          echo "DOTNET_ROOT=$HOME/dotnet-sdk-bootstrap" >> "$GITHUB_ENV"  
-  
-      - name: Verify SDK  
-        run: |  
-          dotnet --info  
-  
-      - name: Prep source build (skip bootstrap/自动下载 SDK，直接使用外部 SDK)  
-        run: |  
-          set -ex  
-          ./prep-source-build.sh -c Release --no-bootstrap --no-sdk --with-sdk "$DOTNET_ROOT"  
-  
-      - name: Build CoreCLR + Libs + Host + AspNetCore + packs
-        run: |
-          set -ex
-          ./build.sh \
-            --with-sdk "$DOTNET_ROOT" \
-            -c Release \
-            /p:Subset=clr+libs+host+packs+aspnetcore \
-            /bl:artifacts/log/Release/build-riscv64.binlog
-  
-      - name: Locate produced nupkgs  
-        run: |  
-          set -ex  
-          find artifacts -iname '*linux-riscv64*.nupkg' -print  
-  
-      - name: Collect nupkgs into a flat release staging dir  
-        run: |  
-          set -ex  
-          mkdir -p release-assets  
-          find artifacts -iname 'Microsoft.NETCore.App.Runtime.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
-          find artifacts -iname 'Microsoft.NETCore.App.Host.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
-          find artifacts -iname 'Microsoft.AspNetCore.App.Runtime.linux-riscv64*.nupkg' -exec cp {} release-assets/ \;  
-          ls -la release-assets/  
-  
-      - name: Upload nupkgs as workflow artifact  
-        uses: actions/upload-artifact@v4  
-        with:  
-          name: dotnet-riscv64-nupkgs  
-          path: release-assets/*.nupkg  
-          if-no-files-found: error  
-  
-      - name: Determine release tag  
-        id: tag  
-        run: |  
-          echo "tag=riscv64-${{ github.event.inputs.dotnet_version }}-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"  
-  
-      - name: Publish GitHub Release  
-        uses: softprops/action-gh-release@v2  
-        with:  
-          tag_name: ${{ steps.tag.outputs.tag }}  
-          name: ".NET riscv64 packages ${{ github.event.inputs.dotnet_version }}"  
-          body: |  
-            自动交叉/原生编译产出的 riscv64 NuGet 包：  
-            - Microsoft.NETCore.App.Runtime.linux-riscv64  
-            - Microsoft.NETCore.App.Host.linux-riscv64  
-            - Microsoft.AspNetCore.App.Runtime.linux-riscv64  
-  
-            基于 dotnet/dotnet@${{ github.event.inputs.dotnet_version }} 构建，  
-            使用自编译 SDK: ${{ github.event.inputs.sdk_url }}  
-          files: release-assets/*.nupkg  
-          draft: false  
-          prerelease: true
+name: Build .NET riscv64 nupkgs
+
+run-name: "Build .NET riscv64 nupkgs : ${{ inputs.branch }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: 'dotnet VMR fork name'
+        required: true
+        type: string
+        default: dotnet
+      branch:
+        description: 'dotnet VMR branch name'
+        required: true
+        type: string
+        default: main
+      branding:
+        description: 'SDK branding'
+        required: true
+        type: choice
+        options:
+          - unstable
+          - preview
+          - release
+        default: preview
+      release:
+        description: 'publish release'
+        type: boolean
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - name: linux
+            libc: glibc
+            docker_tag: azurelinux-3.0-net10.0-cross-riscv64
+          - name: linux-musl
+            libc: musl
+            docker_tag: azurelinux-3.0-net10.0-cross-riscv64-musl
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Maximize build space
+      uses: AdityaGarg8/remove-unwanted-software@v4.1
+      with:
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-cached-tools: 'true'
+
+    - name: Clone repository
+      run: |
+        git clone --single-branch --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet
+
+    - name: Build
+      run: |
+        major_version=$(echo "${{ inputs.branch }}" | sed -E 's/^v?([0-9]+)\..*/\1/')
+
+        branding_arg=""
+        if [[ "$major_version" =~ ^[0-9]+$ ]] && [ "$major_version" -ge 11 ]; then
+          branding_arg="--branding ${{ inputs.branding }}"
+        fi
+
+        echo "Major version: $major_version"
+        echo "Branding argument: $branding_arg"
+
+        docker run --platform linux/amd64 --rm -v${{ github.workspace }}/dotnet:/dotnet -w /dotnet -e ROOTFS_DIR=/crossrootfs/riscv64 \
+          mcr.microsoft.com/dotnet-buildtools/prereqs:${{ matrix.docker_tag }} \
+            ./build.sh --clean-while-building --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-riscv64 --arch riscv64 \
+              $branding_arg -p:OfficialBuildId=$(date +%Y%m%d).99
+
+    # 先列出所有产出的 riscv64 nupkg，确认实际路径长什么样，
+    # 第一次跑完之后可以照日志把下面 Collect 步骤里的 find 表达式改精确
+    - name: List riscv64 nupkg artifacts
+      run: |
+        find "${{ github.workspace }}/dotnet/artifacts" -iname '*riscv64*.nupkg' -print
+
+    - name: Collect target nupkgs into a flat dir
+      run: |
+        set -ex
+        mkdir -p release-assets
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          -iname 'Microsoft.NETCore.App.Runtime.*riscv64*.nupkg' \
+          -o -iname 'Microsoft.NETCore.App.Host.*riscv64*.nupkg' \
+          -o -iname 'Microsoft.AspNetCore.App.Runtime.*riscv64*.nupkg' \
+          | xargs -I{} cp {} release-assets/
+        ls -la release-assets/
+
+    - name: Upload riscv64 nupkgs
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-riscv64-nupkgs-${{ matrix.name }}
+        path: release-assets/*.nupkg
+        if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && inputs.release
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download artifacts
+      if: needs.build.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Make release (Success)
+      if: needs.build.result == 'success'
+      run: |
+        nupkg_paths=$(find "${{ github.workspace }}/artifacts" -name '*.nupkg')
+
+        artifacts=""
+        tag_name=""
+
+        for nupkg_path in $nupkg_paths; do
+          nupkg_filename=$(basename "$nupkg_path")
+          # 从任意一个包名里抓版本号，例如
+          # Microsoft.NETCore.App.Runtime.linux-riscv64.10.0.111.nupkg -> 10.0.111
+          pkg_version=$(echo "$nupkg_filename" | sed -E 's/^.*riscv64\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\1/')
+          artifacts="$artifacts $nupkg_path"
+          tag_name="riscv64-$pkg_version"
+        done
+
+        echo "tag_name: $tag_name"
+        echo "artifacts: $artifacts"
+
+        if [ "${{ inputs.branding }}" = "release" ]; then
+          gh release create "$tag_name" $artifacts --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$tag_name" --notes "$tag_name"
+        else
+          gh release create "$tag_name" $artifacts --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$tag_name" --notes "$tag_name" --prerelease
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create failed tag
+      if: needs.build.result == 'failure' && inputs.branch != 'main'
+      run: |
+        tag_name="${{ inputs.branch }}.${{ github.run_id }}.failed"
+        echo "tag_name: $tag_name"
+
+        gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/$tag_name" -f sha="${{ github.sha }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
