@@ -54,6 +54,7 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-cached-tools: 'true'
+        remove-docker-images: 'true'
 
     - name: Clone repository
       run: |
@@ -71,10 +72,15 @@ jobs:
         echo "Major version: $major_version"
         echo "Branding argument: $branding_arg"
 
+        # 去掉了 --clean-while-building，让中间产物(含 Shipping 目录下的 nupkg)保留到构建结束
         docker run --platform linux/amd64 --rm -v${{ github.workspace }}/dotnet:/dotnet -w /dotnet -e ROOTFS_DIR=/crossrootfs/riscv64 \
           mcr.microsoft.com/dotnet-buildtools/prereqs:${{ matrix.docker_tag }} \
-            ./build.sh --clean-while-building --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-riscv64 --arch riscv64 \
+            ./build.sh --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-riscv64 --arch riscv64 \
               $branding_arg -p:OfficialBuildId=$(date +%Y%m%d).99
+
+    - name: Check disk space after build
+      if: always()
+      run: df -h
 
     # 先列出所有产出的 riscv64 nupkg，确认实际路径长什么样，
     # 第一次跑完之后可以照日志把下面 Collect 步骤里的 find 表达式改精确
@@ -87,10 +93,10 @@ jobs:
         set -ex
         mkdir -p release-assets
         find "${{ github.workspace }}/dotnet/artifacts" \
-          -iname 'Microsoft.NETCore.App.Runtime.*riscv64*.nupkg' \
+          \( -iname 'Microsoft.NETCore.App.Runtime.*riscv64*.nupkg' \
           -o -iname 'Microsoft.NETCore.App.Host.*riscv64*.nupkg' \
-          -o -iname 'Microsoft.AspNetCore.App.Runtime.*riscv64*.nupkg' \
-          | xargs -I{} cp {} release-assets/
+          -o -iname 'Microsoft.AspNetCore.App.Runtime.*riscv64*.nupkg' \) \
+          -exec cp {} release-assets/ \;
         ls -la release-assets/
 
     - name: Upload riscv64 nupkgs
@@ -126,7 +132,7 @@ jobs:
         for nupkg_path in $nupkg_paths; do
           nupkg_filename=$(basename "$nupkg_path")
           # 从任意一个包名里抓版本号，例如
-          # Microsoft.NETCore.App.Runtime.linux-riscv64.10.0.111.nupkg -> 10.0.111
+          # Microsoft.NETCore.App.Runtime.linux-riscv64.10.0.11.nupkg -> 10.0.11
           pkg_version=$(echo "$nupkg_filename" | sed -E 's/^.*riscv64\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\1/')
           artifacts="$artifacts $nupkg_path"
           tag_name="riscv64-$pkg_version"
