@@ -153,6 +153,7 @@ jobs:
               --os linux \
               --rid linux-ppc64le \
               --arch ppc64le \
+              --use-mono-runtime \
               $branding_arg \
               -p:OfficialBuildId=$(date +%Y%m%d).99
 
