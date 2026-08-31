@@ -1,6 +1,6 @@
-name: Build .NET riscv64 nupkgs
+name: Build .NET riscv64/ppc64le nupkgs
 
-run-name: "Build .NET riscv64 nupkgs : ${{ inputs.branch }}"
+run-name: "Build .NET riscv64/ppc64le nupkgs : ${{ inputs.branch }}"
 
 on:
   workflow_dispatch:
@@ -72,21 +72,26 @@ jobs:
         echo "Major version: $major_version"
         echo "Branding argument: $branding_arg"
 
-        # 去掉了 --clean-while-building，让中间产物(含 Shipping 目录下的 nupkg)保留到构建结束
-        docker run --platform linux/amd64 --rm -v${{ github.workspace }}/dotnet:/dotnet -w /dotnet -e ROOTFS_DIR=/crossrootfs/riscv64 \
+        docker run --platform linux/amd64 --rm \
+          -v${{ github.workspace }}/dotnet:/dotnet \
+          -w /dotnet \
+          -e ROOTFS_DIR=/crossrootfs/riscv64 \
           mcr.microsoft.com/dotnet-buildtools/prereqs:${{ matrix.docker_tag }} \
-            ./build.sh --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-riscv64 --arch riscv64 \
-              $branding_arg -p:OfficialBuildId=$(date +%Y%m%d).99
+            ./build.sh --prep -sb \
+              --os ${{ matrix.name }} \
+              --rid ${{ matrix.name }}-riscv64 \
+              --arch riscv64 \
+              $branding_arg \
+              -p:OfficialBuildId=$(date +%Y%m%d).99
 
     - name: Check disk space after build
       if: always()
       run: df -h
 
-    # 先列出所有产出的 riscv64 nupkg，确认实际路径长什么样，
-    # 第一次跑完之后可以照日志把下面 Collect 步骤里的 find 表达式改精确
     - name: List riscv64 nupkg artifacts
       run: |
-        find "${{ github.workspace }}/dotnet/artifacts" -iname '*riscv64*.nupkg' -print
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          -iname '*riscv64*.nupkg' -print
 
     - name: Collect target nupkgs into a flat dir
       run: |
@@ -106,8 +111,84 @@ jobs:
         path: release-assets/*.nupkg
         if-no-files-found: error
 
+  build-ppc64le:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Maximize build space
+      uses: AdityaGarg8/remove-unwanted-software@v4.1
+      with:
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-cached-tools: 'true'
+        remove-docker-images: 'true'
+
+    - name: Clone repository
+      run: |
+        git clone --single-branch --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet
+
+    - name: Build
+      run: |
+        major_version=$(echo "${{ inputs.branch }}" | sed -E 's/^v?([0-9]+)\..*/\1/')
+
+        branding_arg=""
+        if [[ "$major_version" =~ ^[0-9]+$ ]] && [ "$major_version" -ge 11 ]; then
+          branding_arg="--branding ${{ inputs.branding }}"
+        fi
+
+        echo "Major version: $major_version"
+        echo "Branding argument: $branding_arg"
+
+        docker run --platform linux/amd64 --rm \
+          -v${{ github.workspace }}/dotnet:/dotnet \
+          -w /dotnet \
+          -e ROOTFS_DIR=/crossrootfs/ppc64le \
+          mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-ppc64le \
+            ./build.sh --prep -sb \
+              --os linux \
+              --rid linux-ppc64le \
+              --arch ppc64le \
+              $branding_arg \
+              -p:OfficialBuildId=$(date +%Y%m%d).99
+
+    - name: Check disk space after build
+      if: always()
+      run: df -h
+
+    - name: List ppc64le nupkg artifacts
+      run: |
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          -iname '*ppc64le*.nupkg' -print
+
+    - name: Collect target nupkgs into a flat dir
+      run: |
+        set -ex
+        mkdir -p release-assets
+
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          \( -iname 'Microsoft.NETCore.App.Runtime.*ppc64le*.nupkg' \
+          -o -iname 'Microsoft.NETCore.App.Host.*ppc64le*.nupkg' \
+          -o -iname 'Microsoft.AspNetCore.App.Runtime.*ppc64le*.nupkg' \) \
+          -exec cp {} release-assets/ \;
+
+        ls -la release-assets/
+
+    - name: Upload ppc64le nupkgs
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-ppc64le-nupkgs
+        path: release-assets/*.nupkg
+        if-no-files-found: error
+
   release:
-    needs: build
+    needs:
+      - build
+      - build-ppc64le
     runs-on: ubuntu-latest
     if: always() && inputs.release
 
@@ -116,25 +197,26 @@ jobs:
 
     steps:
     - name: Download artifacts
-      if: needs.build.result == 'success'
+      if: needs.build.result == 'success' && needs.build-ppc64le.result == 'success'
       uses: actions/download-artifact@v4
       with:
         path: artifacts
 
     - name: Make release (Success)
-      if: needs.build.result == 'success'
+      if: needs.build.result == 'success' && needs.build-ppc64le.result == 'success'
       run: |
-        nupkg_paths=$(find "${{ github.workspace }}/artifacts" -name '*.nupkg')
+        mapfile -t nupkg_paths < <(find "${{ github.workspace }}/artifacts" -name '*.nupkg' -print)
 
         artifacts=""
         tag_name=""
 
-        for nupkg_path in $nupkg_paths; do
+        for nupkg_path in "${nupkg_paths[@]}"; do
           nupkg_filename=$(basename "$nupkg_path")
-          # 从任意一个包名里抓版本号，例如
-          # Microsoft.NETCore.App.Runtime.linux-riscv64.10.0.11.nupkg -> 10.0.11
-          pkg_version=$(echo "$nupkg_filename" | sed -E 's/^.*riscv64\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\1/')
-          artifacts="$artifacts $nupkg_path"
+
+          pkg_version=$(echo "$nupkg_filename" | sed -E \
+            's/^.*\.(riscv64|ppc64le)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
+
+          artifacts="$artifacts \"$nupkg_path\""
           tag_name="$pkg_version"
         done
 
@@ -142,19 +224,34 @@ jobs:
         echo "artifacts: $artifacts"
 
         if [ "${{ inputs.branding }}" = "release" ]; then
-          gh release create "$tag_name" $artifacts --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$tag_name" --notes "$tag_name"
+          gh release create "$tag_name" \
+            "${nupkg_paths[@]}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$tag_name" \
+            --notes "$tag_name"
         else
-          gh release create "$tag_name" $artifacts --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$tag_name" --notes "$tag_name" --prerelease
+          gh release create "$tag_name" \
+            "${nupkg_paths[@]}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$tag_name" \
+            --notes "$tag_name" \
+            --prerelease
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Create failed tag
-      if: needs.build.result == 'failure' && inputs.branch != 'main'
+      if: |
+        (needs.build.result == 'failure' || needs.build-ppc64le.result == 'failure')
+        && inputs.branch != 'main'
       run: |
         tag_name="${{ inputs.branch }}.${{ github.run_id }}.failed"
         echo "tag_name: $tag_name"
 
-        gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/$tag_name" -f sha="${{ github.sha }}"
+        gh api repos/${{ github.repository }}/git/refs \
+          -f ref="refs/tags/$tag_name" \
+          -f sha="${{ github.sha }}"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
