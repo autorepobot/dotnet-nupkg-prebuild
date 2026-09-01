@@ -1,6 +1,6 @@
-name: Build .NET riscv64/ppc64le/loongarch64 nupkgs
+name: Build .NET riscv64/ppc64le/loongarch64/x86 nupkgs
 
-run-name: "Build .NET riscv64/ppc64le/loongarch64 nupkgs : ${{ inputs.branch }}"
+run-name: "Build .NET riscv64/ppc64le/loongarch64/x86 nupkgs : ${{ inputs.branch }}"
 
 on:
   workflow_dispatch:
@@ -36,9 +36,6 @@ jobs:
           - name: linux
             libc: glibc
             docker_tag: azurelinux-3.0-net10.0-cross-riscv64
-          - name: linux-musl
-            libc: musl
-            docker_tag: azurelinux-3.0-net10.0-cross-riscv64-musl
 
     runs-on: ubuntu-latest
 
@@ -260,11 +257,87 @@ jobs:
         path: release-assets/*.nupkg
         if-no-files-found: error
 
+  build-x86:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Maximize build space
+      uses: AdityaGarg8/remove-unwanted-software@v4.1
+      with:
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-cached-tools: 'true'
+        remove-docker-images: 'true'
+
+    - name: Clone repository
+      run: |
+        git clone --single-branch --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet
+
+    - name: Build
+      run: |
+        major_version=$(echo "${{ inputs.branch }}" | sed -E 's/^v?([0-9]+)\..*/\1/')
+
+        branding_arg=""
+        if [[ "$major_version" =~ ^[0-9]+$ ]] && [ "$major_version" -ge 11 ]; then
+          branding_arg="--branding ${{ inputs.branding }}"
+        fi
+
+        echo "Major version: $major_version"
+        echo "Branding argument: $branding_arg"
+
+        docker run --platform linux/amd64 --rm \
+          -v${{ github.workspace }}/dotnet:/dotnet \
+          -w /dotnet \
+          -e ROOTFS_DIR=/crossrootfs/x86 \
+          mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-x86 \
+            ./build.sh --prep -sb \
+              --os linux \
+              --rid linux-x86 \
+              --arch x86 \
+              --use-mono-runtime \
+              $branding_arg \
+              -p:OfficialBuildId=$(date +%Y%m%d).99
+
+    - name: Check disk space after build
+      if: always()
+      run: df -h
+
+    - name: List x86 nupkg artifacts
+      run: |
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          -iname '*linux-x86*.nupkg' -print
+
+    - name: Collect target nupkgs into a flat dir
+      run: |
+        set -ex
+        mkdir -p release-assets
+
+        find "${{ github.workspace }}/dotnet/artifacts" \
+          \( -iname 'Microsoft.NETCore.App.Runtime.*linux-x86*.nupkg' \
+          -o -iname 'Microsoft.NETCore.App.Host.*linux-x86*.nupkg' \
+          -o -iname 'Microsoft.AspNetCore.App.Runtime.*linux-x86*.nupkg' \) \
+          -exec cp {} release-assets/ \;
+
+        ls -la release-assets/
+
+    - name: Upload x86 nupkgs
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-x86-nupkgs
+        path: release-assets/*.nupkg
+        if-no-files-found: error
+
   release:
     needs:
       - build
       - build-ppc64le
       - build-loongarch64
+      - build-x86
     runs-on: ubuntu-latest
     if: always() && inputs.release
 
@@ -273,13 +346,21 @@ jobs:
 
     steps:
     - name: Download artifacts
-      if: needs.build.result == 'success' && needs.build-ppc64le.result == 'success' && needs.build-loongarch64.result == 'success'
+      if: |
+        needs.build.result == 'success' &&
+        needs.build-ppc64le.result == 'success' &&
+        needs.build-loongarch64.result == 'success' &&
+        needs.build-x86.result == 'success'
       uses: actions/download-artifact@v4
       with:
         path: artifacts
 
     - name: Make release (Success)
-      if: needs.build.result == 'success' && needs.build-ppc64le.result == 'success' && needs.build-loongarch64.result == 'success'
+      if: |
+        needs.build.result == 'success' &&
+        needs.build-ppc64le.result == 'success' &&
+        needs.build-loongarch64.result == 'success' &&
+        needs.build-x86.result == 'success'
       run: |
         mapfile -t nupkg_paths < <(find "${{ github.workspace }}/artifacts" -name '*.nupkg' -print)
 
@@ -290,7 +371,7 @@ jobs:
           nupkg_filename=$(basename "$nupkg_path")
 
           pkg_version=$(echo "$nupkg_filename" | sed -E \
-            's/^.*\.linux-(riscv64|ppc64le|loongarch64)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
+            's/^.*\.linux-(x86|riscv64|ppc64le|loongarch64)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
 
           artifacts="$artifacts \"$nupkg_path\""
           tag_name="$pkg_version"
@@ -320,7 +401,10 @@ jobs:
 
     - name: Create failed tag
       if: |
-        (needs.build.result == 'failure' || needs.build-ppc64le.result == 'failure' || needs.build-loongarch64.result == 'failure')
+        (needs.build.result == 'failure' ||
+         needs.build-ppc64le.result == 'failure' ||
+         needs.build-loongarch64.result == 'failure' ||
+         needs.build-x86.result == 'failure')
         && inputs.branch != 'main'
       run: |
         tag_name="${{ inputs.branch }}.${{ github.run_id }}.failed"
