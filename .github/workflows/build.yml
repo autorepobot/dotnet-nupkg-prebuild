@@ -290,7 +290,7 @@ jobs:
           nupkg_filename=$(basename "$nupkg_path")
 
           pkg_version=$(echo "$nupkg_filename" | sed -E \
-            's/^.*\.(riscv64|ppc64le|loongarch64)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
+            's/^.*\.linux-(riscv64|ppc64le|loongarch64)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
 
           artifacts="$artifacts \"$nupkg_path\""
           tag_name="$pkg_version"
