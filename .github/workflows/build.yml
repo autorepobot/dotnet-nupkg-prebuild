@@ -372,7 +372,14 @@ jobs:
         $buildId = (Get-Date -Format 'yyyyMMdd') + '.99'
         Push-Location $runtimeRoot
         try {
-          & .\build.cmd -subset mono+libs+host.native+packs.product -configuration Release -arch $env:TARGET_ARCH -runtimeFlavor mono '-p:PrimaryRuntimeFlavor=CoreCLR' "-p:OfficialBuildId=$buildId"
+          & .\build.cmd `
+            -subset mono+libs+host.native+packs.product `
+            -configuration Release `
+            -arch $env:TARGET_ARCH `
+            -runtimeFlavor Mono `
+            -usemonoruntime `
+            '/p:RuntimeSpecificFrameworkSuffix=Mono' `
+            "/p:OfficialBuildId=$buildId"
           if ($LASTEXITCODE -ne 0) { throw "Mono build failed for win-$env:TARGET_ARCH." }
         }
         finally {
