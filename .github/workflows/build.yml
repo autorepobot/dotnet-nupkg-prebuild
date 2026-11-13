@@ -399,6 +399,7 @@ jobs:
             -runtimeFlavor Mono `
             -usemonoruntime `
             '/p:RuntimeSpecificFrameworkSuffix=Mono' `
+            '/p:StabilizePackageVersion=true' `
             '/p:WarningsNotAsErrors=NU1603' `
             "/p:OfficialBuildId=$buildId"
           if ($LASTEXITCODE -ne 0) { throw "Mono build failed for win-$env:TARGET_ARCH." }
