@@ -432,13 +432,21 @@ jobs:
         foreach ($package in $packages) {
           $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
           try {
-            $names = @($archive.Entries | ForEach-Object FullName)
-            if (-not ($names | Where-Object { $_ -match '(^|/)mono-2\.0-bdwgc\.dll$' })) {
-              throw "Mono engine not present in $($package.FullName)"
+            $entries = @($archive.Entries)
+            $enginePath = "runtimes/win-$env:TARGET_ARCH/native/coreclr.dll"
+            $engine = @($entries | Where-Object {
+              $_.FullName -ieq $enginePath -and $_.Length -gt 0
+            })
+            $corelib = @($entries | Where-Object {
+              $_.FullName -match '(^|/)System\.Private\.CoreLib\.dll$' -and $_.Length -gt 0
+            })
+            if ($engine.Count -ne 1 -or $corelib.Count -ne 1) {
+              $entries |
+                Where-Object { $_.FullName -match '(?i)(mono|coreclr|corelib)' } |
+                ForEach-Object { Write-Host "Package entry: $($_.FullName) ($($_.Length) bytes)" }
+              throw "Invalid Mono runtime pack: $($package.FullName) (engine=$($engine.Count), corelib=$($corelib.Count))"
             }
-            if (-not ($names | Where-Object { $_ -match '(^|/)System\.Private\.CoreLib\.dll$' })) {
-              throw "Core library not present in $($package.FullName)"
-            }
+            Write-Host "Verified Mono runtime pack: $($package.Name)"
           }
           finally {
             $archive.Dispose()
