@@ -1,6 +1,6 @@
-name: Build .NET riscv64/ppc64le/loongarch64/x86 nupkgs
+name: Build .NET Linux and Windows Mono nupkgs
 
-run-name: "Build .NET riscv64/ppc64le/loongarch64/x86 nupkgs : ${{ inputs.branch }}"
+run-name: "Build .NET nupkgs : ${{ inputs.branch }}"
 
 on:
   workflow_dispatch:
@@ -332,12 +332,83 @@ jobs:
         path: release-assets/*.nupkg
         if-no-files-found: error
 
+  build-windows-mono:
+    if: ${{ startsWith(inputs.branch, 'release/8.0') || startsWith(inputs.branch, 'v8.') || startsWith(inputs.branch, '8.') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    permissions:
+      contents: read
+
+    env:
+      VMR_FORK: ${{ inputs.fork }}
+      VMR_BRANCH: ${{ inputs.branch }}
+      TARGET_ARCH: ${{ matrix.arch }}
+
+    steps:
+    - name: Clone VMR source
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:VMR_FORK -notmatch '^[A-Za-z0-9_.-]+$') {
+          throw 'Invalid VMR fork name.'
+        }
+        git config --global core.longpaths true
+        git clone --single-branch --depth 1 --branch $env:VMR_BRANCH "https://github.com/$env:VMR_FORK/dotnet.git" C:\dotnet
+        if ($LASTEXITCODE -ne 0) { throw 'VMR clone failed.' }
+
+    - name: Build Windows Mono runtime and packages
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $runtimeRoot = 'C:\dotnet\src\runtime'
+        if (-not (Test-Path "$runtimeRoot\build.cmd")) {
+          throw "Runtime build entrypoint not found: $runtimeRoot\build.cmd"
+        }
+        $buildId = (Get-Date -Format 'yyyyMMdd') + '.99'
+        Push-Location $runtimeRoot
+        try {
+          & .\build.cmd -subset mono+libs+host+packs -configuration Release -arch $env:TARGET_ARCH -runtimeFlavor mono "-p:OfficialBuildId=$buildId"
+          if ($LASTEXITCODE -ne 0) { throw "Mono build failed for win-$env:TARGET_ARCH." }
+        }
+        finally {
+          Pop-Location
+        }
+
+    - name: Collect Windows Mono runtime nupkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $packageRoot = 'C:\dotnet\src\runtime\artifacts\packages'
+        $packageName = "Microsoft.NETCore.App.Runtime.Mono.win-$env:TARGET_ARCH.*.nupkg"
+        if (-not (Test-Path $packageRoot)) { throw "No package output directory: $packageRoot" }
+        $packages = @(Get-ChildItem -Path $packageRoot -Recurse -File -Filter $packageName)
+        if ($packages.Count -eq 0) { throw "Expected Mono runtime pack not found: $packageName" }
+        New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+        foreach ($package in $packages) {
+          Copy-Item -LiteralPath $package.FullName -Destination release-assets -ErrorAction Stop
+        }
+        Get-ChildItem release-assets
+
+    - name: Upload Windows Mono nupkg
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-windows-mono-${{ matrix.arch }}-nupkgs
+        path: release-assets/*.nupkg
+        if-no-files-found: error
+
   release:
     needs:
       - build
       - build-ppc64le
       - build-loongarch64
       - build-x86
+      - build-windows-mono
     runs-on: ubuntu-latest
     if: always() && inputs.release
 
@@ -350,7 +421,8 @@ jobs:
         needs.build.result == 'success' &&
         needs.build-ppc64le.result == 'success' &&
         needs.build-loongarch64.result == 'success' &&
-        needs.build-x86.result == 'success'
+        needs.build-x86.result == 'success' &&
+        (needs.build-windows-mono.result == 'success' || needs.build-windows-mono.result == 'skipped')
       uses: actions/download-artifact@v4
       with:
         path: artifacts
@@ -360,7 +432,8 @@ jobs:
         needs.build.result == 'success' &&
         needs.build-ppc64le.result == 'success' &&
         needs.build-loongarch64.result == 'success' &&
-        needs.build-x86.result == 'success'
+        needs.build-x86.result == 'success' &&
+        (needs.build-windows-mono.result == 'success' || needs.build-windows-mono.result == 'skipped')
       run: |
         mapfile -t nupkg_paths < <(find "${{ github.workspace }}/artifacts" -name '*.nupkg' -print)
 
@@ -370,8 +443,19 @@ jobs:
         for nupkg_path in "${nupkg_paths[@]}"; do
           nupkg_filename=$(basename "$nupkg_path")
 
-          pkg_version=$(echo "$nupkg_filename" | sed -E \
-            's/^.*\.linux-(x86|riscv64|ppc64le|loongarch64)\.([0-9][^.]*(\.[^.]+)*)\.nupkg$/\2/')
+          if [[ "$nupkg_filename" =~ ^Microsoft\.NETCore\.App\.Runtime\.Mono\.win-(x64|x86)\.(.+)\.nupkg$ ]]; then
+            pkg_version="${BASH_REMATCH[2]}"
+          elif [[ "$nupkg_filename" =~ ^.+\.linux-(x86|riscv64|ppc64le|loongarch64)\.(.+)\.nupkg$ ]]; then
+            pkg_version="${BASH_REMATCH[2]}"
+          else
+            echo "Unexpected package name: $nupkg_filename" >&2
+            exit 1
+          fi
+
+          if [[ -n "$tag_name" && "$pkg_version" != "$tag_name" ]]; then
+            echo "Mismatched package versions: $tag_name vs $pkg_version" >&2
+            exit 1
+          fi
 
           artifacts="$artifacts \"$nupkg_path\""
           tag_name="$pkg_version"
@@ -404,7 +488,8 @@ jobs:
         (needs.build.result == 'failure' ||
          needs.build-ppc64le.result == 'failure' ||
          needs.build-loongarch64.result == 'failure' ||
-         needs.build-x86.result == 'failure')
+         needs.build-x86.result == 'failure' ||
+         needs.build-windows-mono.result == 'failure')
         && inputs.branch != 'main'
       run: |
         tag_name="${{ inputs.branch }}.${{ github.run_id }}.failed"
