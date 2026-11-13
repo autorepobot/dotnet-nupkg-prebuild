@@ -1,3 +1,4 @@
+
 name: Build .NET Linux and Windows Mono nupkgs
 
 run-name: "Build .NET nupkgs : ${{ inputs.branch }}"
@@ -360,6 +361,26 @@ jobs:
         git config --global core.longpaths true
         git clone --single-branch --depth 1 --branch $env:VMR_BRANCH "https://github.com/$env:VMR_FORK/dotnet.git" C:\dotnet
         if ($LASTEXITCODE -ne 0) { throw 'VMR clone failed.' }
+
+    - name: Fix Mono apphost packaging
+      shell: pwsh
+      run: |
+        $path = 'C:\dotnet\src\runtime\src\installer\pkg\sfx\Microsoft.NETCore.App\Microsoft.NETCore.App.Host.sfxproj'
+        $content = [System.IO.File]::ReadAllText($path)
+
+        $old = '<HeatOutputFileElementToStabilize Include="native\singlefilehost.exe" ReplacementId="staticapphosttemplateapphostexe" />'
+        $new = '<HeatOutputFileElementToStabilize Include="native\singlefilehost.exe" ReplacementId="staticapphosttemplateapphostexe" Condition="''$(RuntimeFlavor)'' != ''Mono'' and ''$(TargetsLinuxBionic)'' != ''true''" />'
+
+        if (-not $content.Contains($old)) {
+            throw "Expected apphost packaging configuration not found."
+        }
+
+        $content = $content.Replace($old, $new)
+        [System.IO.File]::WriteAllText(
+            $path,
+            $content,
+            [System.Text.UTF8Encoding]::new($false)
+        )
 
     - name: Build Windows Mono runtime and packages
       shell: pwsh
